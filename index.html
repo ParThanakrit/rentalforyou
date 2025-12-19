@@ -118,6 +118,27 @@
         .skeleton-badge{width:80px;height:30px;border-radius:15px}
         .skeleton-btn{width:70px;height:30px;border-radius:20px}
         
+        /* ⭐ Calendar Skeleton Loading */
+        .calendar-skeleton{
+            padding:8px;
+        }
+        .calendar-skeleton-row{
+            display:grid;
+            grid-template-columns:repeat(7,1fr);
+            gap:2px;
+            margin-bottom:2px;
+        }
+        .calendar-skeleton-day{
+            aspect-ratio:1;
+            border-radius:6px;
+        }
+        .calendar-loading-text{
+            text-align:center;
+            padding:20px;
+            color:var(--brown-light);
+            font-size:0.9rem;
+        }
+        
         /* ⭐ Cache Status Indicator */
         .cache-status{
             position:fixed;
@@ -223,7 +244,11 @@
         
         // ⭐ Cache Configuration
         const CACHE_KEY = 'rental_dresses_cache';
-        const CACHE_DURATION = 5 * 60 * 1000; // 5 นาที (ปรับได้ตามต้องการ)
+        const CACHE_DURATION = 5 * 60 * 1000; // 5 นาที
+        
+        // ⭐ NEW: Cache สำหรับ Booked Dates แต่ละชุด
+        const BOOKED_CACHE_KEY = 'rental_booked_cache';
+        const BOOKED_CACHE_DURATION = 2 * 60 * 1000; // 2 นาที (สั้นกว่าเพราะอาจเปลี่ยนบ่อย)
         
         let dresses=[];
         let filtered=[];
@@ -231,6 +256,7 @@
         let booked=[];
         let month=new Date().getMonth();
         let year=new Date().getFullYear();
+        let isLoadingBooked = false; // ⭐ ป้องกันโหลดซ้ำ
         
         // ⭐ แสดง Skeleton Loading ก่อน
         function showSkeletonLoading(count = 8) {
@@ -284,6 +310,44 @@
                 }));
             } catch (e) {
                 console.warn('Could not save to cache:', e);
+            }
+        }
+        
+        // ⭐ NEW: ดึง Booked Dates จาก Cache
+        function getBookedFromCache(code) {
+            try {
+                const cached = localStorage.getItem(BOOKED_CACHE_KEY);
+                if (!cached) return null;
+                
+                const allBooked = JSON.parse(cached);
+                const item = allBooked[code];
+                
+                if (!item) return null;
+                
+                const isExpired = Date.now() - item.timestamp > BOOKED_CACHE_DURATION;
+                return { dates: item.dates, isExpired };
+            } catch (e) {
+                return null;
+            }
+        }
+        
+        // ⭐ NEW: บันทึก Booked Dates ลง Cache
+        function saveBookedToCache(code, dates) {
+            try {
+                let allBooked = {};
+                const cached = localStorage.getItem(BOOKED_CACHE_KEY);
+                if (cached) {
+                    allBooked = JSON.parse(cached);
+                }
+                
+                allBooked[code] = {
+                    dates: dates,
+                    timestamp: Date.now()
+                };
+                
+                localStorage.setItem(BOOKED_CACHE_KEY, JSON.stringify(allBooked));
+            } catch (e) {
+                console.warn('Could not save booked to cache:', e);
             }
         }
         
@@ -415,27 +479,78 @@
             `).join('');
         }
         
+        // ⭐⭐⭐ แก้ไขใหม่: เปิด Modal ทันที ไม่ต้องรอโหลดวันว่าง
         async function openModal(code){
             current=dresses.find(d=>d.code===code);
             if(!current)return;
+            
+            // 1. แสดง Modal ทันที
             document.getElementById('modalTitle').textContent=current.name;
             document.getElementById('dressModal').classList.add('show');
             document.body.style.overflow='hidden';
             month=new Date().getMonth();
             year=new Date().getFullYear();
-            await fetchBooked(code);
-            renderModal();
+            
+            // 2. ⭐ Render Modal พร้อม Calendar Loading ก่อน
+            booked = []; // Reset
+            renderModal(true); // true = กำลังโหลด
+            
+            // 3. ⭐ ลองดึงจาก Cache ก่อน
+            const cachedBooked = getBookedFromCache(code);
+            
+            if (cachedBooked && cachedBooked.dates) {
+                // มี Cache! แสดงทันที
+                booked = cachedBooked.dates;
+                renderCal();
+                
+                // ถ้า Cache หมดอายุ อัพเดทเบื้องหลัง
+                if (cachedBooked.isExpired) {
+                    fetchBooked(code, true); // silent
+                }
+            } else {
+                // ไม่มี Cache - ต้องโหลดจาก API
+                fetchBooked(code, false);
+            }
         }
         
-        async function fetchBooked(code){
+        // ⭐ แก้ไข: เพิ่ม silent mode
+        async function fetchBooked(code, silent = false){
+            if (isLoadingBooked && !silent) return;
+            isLoadingBooked = true;
+            
             try{
-                const r=await fetch(API+'?action=check&code='+code);
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                
+                const r=await fetch(API+'?action=check&code='+code, {
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                
                 const d=await r.json();
-                if(d.success)booked=d.bookedDates||[];
-            }catch(e){booked=[]}
+                if(d.success){
+                    booked=d.bookedDates||[];
+                    // ⭐ บันทึกลง Cache
+                    saveBookedToCache(code, booked);
+                    // ⭐ อัพเดท Calendar
+                    renderCal();
+                }
+            }catch(e){
+                console.error('Fetch booked error:', e);
+                if (!silent) {
+                    // แสดงข้อความ error ใน calendar
+                    const calBody = document.getElementById('calBody');
+                    if (calBody) {
+                        calBody.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--brown-light);font-size:0.85rem">ไม่สามารถโหลดได้ ลองใหม่อีกครั้ง</div>';
+                    }
+                }
+            } finally {
+                isLoadingBooked = false;
+            }
         }
         
-        function renderModal(){
+        // ⭐ แก้ไข: รองรับ Loading State
+        function renderModal(isLoading = false){
             document.getElementById('modalBody').innerHTML=`
                 <div class="modal-image-wrapper">
                     <img class="modal-image" 
@@ -462,7 +577,9 @@
                     </div>
                     <div class="calendar">
                         <div class="calendar-header"><span>อา</span><span>จ</span><span>อ</span><span>พ</span><span>พฤ</span><span>ศ</span><span>ส</span></div>
-                        <div class="calendar-body" id="calBody"></div>
+                        <div class="calendar-body" id="calBody">
+                            ${isLoading ? renderCalendarSkeleton() : ''}
+                        </div>
                     </div>
                     <div class="calendar-legend">
                         <div class="legend-item"><div class="legend-dot available"></div><span>ว่าง</span></div>
@@ -474,7 +591,30 @@
                     💬 แอดไลน์จองชุด
                 </a>
             `;
-            renderCal();
+            
+            // ถ้าไม่ใช่ loading mode ให้ render calendar
+            if (!isLoading) {
+                renderCal();
+            } else {
+                // แสดงเดือนปัจจุบันก่อน
+                const m=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+                document.getElementById('calMonth').textContent=m[month]+' '+(year+543);
+            }
+        }
+        
+        // ⭐ NEW: แสดง Calendar Skeleton ระหว่างโหลด
+        function renderCalendarSkeleton() {
+            let html = '<div class="calendar-loading-text">⏳ กำลังโหลดวันว่าง...</div>';
+            html += '<div class="calendar-skeleton">';
+            for (let row = 0; row < 5; row++) {
+                html += '<div class="calendar-skeleton-row">';
+                for (let col = 0; col < 7; col++) {
+                    html += '<div class="calendar-skeleton-day skeleton"></div>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
         }
         
         function changeMonth(d){
@@ -533,6 +673,7 @@
         // ⭐ ปุ่ม Force Refresh (ถ้าต้องการ)
         function forceRefresh() {
             localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(BOOKED_CACHE_KEY);
             location.reload();
         }
         
