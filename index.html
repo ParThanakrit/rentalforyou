@@ -98,6 +98,43 @@
         .spinner{width:40px;height:40px;border:3px solid var(--cream-dark);border-top-color:var(--gold);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 15px}
         @keyframes spin{to{transform:rotate(360deg)}}
         .footer{text-align:center;padding:30px;color:var(--brown-light);font-size:0.85rem}
+        
+        /* ⭐ Skeleton Loading Styles */
+        .skeleton{
+            background:linear-gradient(90deg,var(--cream) 25%,var(--cream-dark) 50%,var(--cream) 75%);
+            background-size:200% 100%;
+            animation:shimmer 1.5s infinite;
+        }
+        @keyframes shimmer{
+            0%{background-position:200% 0}
+            100%{background-position:-200% 0}
+        }
+        .skeleton-card{background:var(--white);border-radius:16px;overflow:hidden;box-shadow:0 4px 20px var(--shadow)}
+        .skeleton-image{width:100%;padding-top:100%;position:relative}
+        .skeleton-text{height:16px;border-radius:8px;margin:15px}
+        .skeleton-text.short{width:60%}
+        .skeleton-text.tiny{width:40%;height:12px}
+        .skeleton-price{display:flex;justify-content:space-between;padding:0 15px 15px}
+        .skeleton-badge{width:80px;height:30px;border-radius:15px}
+        .skeleton-btn{width:70px;height:30px;border-radius:20px}
+        
+        /* ⭐ Cache Status Indicator */
+        .cache-status{
+            position:fixed;
+            bottom:20px;
+            right:20px;
+            background:var(--brown);
+            color:var(--white);
+            padding:8px 16px;
+            border-radius:20px;
+            font-size:0.75rem;
+            opacity:0;
+            transition:opacity 0.3s;
+            z-index:1000;
+        }
+        .cache-status.show{opacity:1}
+        .cache-status.updating{background:var(--gold)}
+        
         @media (max-width:768px){
             .header-content{flex-direction:column;gap:15px}
             .nav-tabs{width:100%;justify-content:center;flex-wrap:wrap}
@@ -173,13 +210,20 @@
     <div class="footer">
         © 2026 Rental For You | ชุดสวยสไตล์มินิมอล สำหรับทุกโอกาส
     </div>
+    
+    <!-- ⭐ Cache Status Indicator -->
+    <div class="cache-status" id="cacheStatus"></div>
 
     <script>
         const API='https://script.google.com/macros/s/AKfycbzpi3AUgVDIgSdm2SHYhqbdI819Xq9DWkFAfvXLe3c8U-H-tyH-ZDSp19nMu6D-hCxy/exec';
         const LINE='https://line.me/R/ti/p/@897pymlg';
         
         // ⭐ ใช้รูปจาก folder images/ ใน Netlify
-        const IMG_PATH = 'images/'; // เปลี่ยนเป็น '' ถ้าเก็บที่ root
+        const IMG_PATH = 'images/';
+        
+        // ⭐ Cache Configuration
+        const CACHE_KEY = 'rental_dresses_cache';
+        const CACHE_DURATION = 5 * 60 * 1000; // 5 นาที (ปรับได้ตามต้องการ)
         
         let dresses=[];
         let filtered=[];
@@ -188,17 +232,128 @@
         let month=new Date().getMonth();
         let year=new Date().getFullYear();
         
-        async function load(){
-            try{
-                const r=await fetch(API+'?action=list');
-                const d=await r.json();
-                if(d.success){
-                    dresses=d.data;
-                    filtered=dresses;
-                    populateFilters();
-                    renderDresses();
+        // ⭐ แสดง Skeleton Loading ก่อน
+        function showSkeletonLoading(count = 8) {
+            const g = document.getElementById('dressGrid');
+            let html = '';
+            for (let i = 0; i < count; i++) {
+                html += `
+                    <div class="skeleton-card">
+                        <div class="skeleton-image skeleton"></div>
+                        <div class="skeleton-text skeleton"></div>
+                        <div class="skeleton-text short skeleton"></div>
+                        <div class="skeleton-price">
+                            <div class="skeleton-badge skeleton"></div>
+                            <div class="skeleton-btn skeleton"></div>
+                        </div>
+                    </div>
+                `;
+            }
+            g.innerHTML = html;
+        }
+        
+        // ⭐ แสดง Cache Status
+        function showCacheStatus(message, isUpdating = false) {
+            const status = document.getElementById('cacheStatus');
+            status.textContent = message;
+            status.className = 'cache-status show' + (isUpdating ? ' updating' : '');
+            setTimeout(() => status.classList.remove('show'), 2000);
+        }
+        
+        // ⭐ ดึงข้อมูลจาก Cache
+        function getFromCache() {
+            try {
+                const cached = localStorage.getItem(CACHE_KEY);
+                if (!cached) return null;
+                
+                const { data, timestamp } = JSON.parse(cached);
+                const isExpired = Date.now() - timestamp > CACHE_DURATION;
+                
+                return { data, isExpired };
+            } catch (e) {
+                return null;
+            }
+        }
+        
+        // ⭐ บันทึกลง Cache
+        function saveToCache(data) {
+            try {
+                localStorage.setItem(CACHE_KEY, JSON.stringify({
+                    data: data,
+                    timestamp: Date.now()
+                }));
+            } catch (e) {
+                console.warn('Could not save to cache:', e);
+            }
+        }
+        
+        // ⭐ Load แบบใหม่ - ใช้ Cache ก่อน
+        async function load() {
+            // 1. แสดง Skeleton ทันที
+            showSkeletonLoading();
+            
+            // 2. ลองดึงจาก Cache ก่อน
+            const cached = getFromCache();
+            
+            if (cached && cached.data && cached.data.length > 0) {
+                // ⭐ มี Cache! แสดงทันที
+                dresses = cached.data;
+                filtered = dresses;
+                populateFilters();
+                renderDresses();
+                
+                if (cached.isExpired) {
+                    // Cache หมดอายุ - อัพเดทเบื้องหลัง
+                    showCacheStatus('⏳ กำลังอัพเดท...', true);
+                    fetchFromAPI(true); // silent update
+                } else {
+                    showCacheStatus('⚡ โหลดจาก Cache');
                 }
-            }catch(e){console.error(e)}
+            } else {
+                // ⭐ ไม่มี Cache - ต้องดึงจาก API
+                showCacheStatus('🔄 กำลังโหลด...');
+                await fetchFromAPI(false);
+            }
+        }
+        
+        // ⭐ ดึงข้อมูลจาก API
+        async function fetchFromAPI(silentUpdate = false) {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+                
+                const r = await fetch(API + '?action=list', { 
+                    signal: controller.signal 
+                });
+                clearTimeout(timeoutId);
+                
+                const d = await r.json();
+                
+                if (d.success && d.data) {
+                    // บันทึกลง Cache
+                    saveToCache(d.data);
+                    
+                    // ถ้าไม่ใช่ silent update หรือข้อมูลต่างกัน
+                    if (!silentUpdate || JSON.stringify(dresses) !== JSON.stringify(d.data)) {
+                        dresses = d.data;
+                        filtered = dresses;
+                        populateFilters();
+                        renderDresses();
+                    }
+                    
+                    if (silentUpdate) {
+                        showCacheStatus('✅ อัพเดทแล้ว');
+                    } else {
+                        showCacheStatus('✅ โหลดสำเร็จ');
+                    }
+                }
+            } catch (e) {
+                console.error('API Error:', e);
+                if (!silentUpdate && dresses.length === 0) {
+                    document.getElementById('dressGrid').innerHTML = 
+                        '<p style="grid-column:1/-1;text-align:center;padding:40px;color:var(--brown-light)">ไม่สามารถโหลดข้อมูลได้ กรุณาลองใหม่</p>';
+                }
+            }
         }
         
         function populateFilters(){
@@ -210,6 +365,11 @@
             });
             const bf=document.getElementById('brandFilter');
             const sf=document.getElementById('sizeFilter');
+            
+            // Clear existing options (except first)
+            bf.length = 1;
+            sf.length = 1;
+            
             brands.forEach(b=>bf.add(new Option(b,b)));
             sizes.forEach(s=>sf.add(new Option(s,s)));
         }
@@ -233,11 +393,14 @@
                 g.innerHTML='<p style="grid-column:1/-1;text-align:center;padding:40px;color:var(--brown-light)">ไม่พบชุดที่ค้นหา</p>';
                 return;
             }
+            // ⭐ เพิ่ม loading="lazy" สำหรับรูปภาพ
             g.innerHTML=filtered.map(d=>`
                 <div class="dress-card" onclick="openModal('${d.code}')">
                     <div class="dress-image-wrapper">
-                        <img class="dress-image" src="${IMG_PATH}${d.code}.jpg" 
+                        <img class="dress-image" 
+                             src="${IMG_PATH}${d.code}.jpg" 
                              alt="${d.name}" 
+                             loading="lazy"
                              onerror="this.src='${IMG_PATH}placeholder.jpg'">
                     </div>
                     <div class="dress-card-info">
@@ -366,6 +529,12 @@
         function fmt(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
         
         document.getElementById('dressModal').addEventListener('click',e=>{if(e.target.id==='dressModal')closeModal()});
+        
+        // ⭐ ปุ่ม Force Refresh (ถ้าต้องการ)
+        function forceRefresh() {
+            localStorage.removeItem(CACHE_KEY);
+            location.reload();
+        }
         
         load();
     </script>
